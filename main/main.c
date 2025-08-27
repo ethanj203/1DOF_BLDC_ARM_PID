@@ -44,9 +44,9 @@ Todo:
 #define BUTTON_PIN      GPIO_NUM_18
 
 //PID Controller Params
-#define KP              0.35
+#define KP              0.05
 #define KI              5.0
-#define KD              1.0
+#define KD              1.5
 #define RUNTIME         20 //seconds
 #define DTMS            10  //~1ms interval for PID loop calcs (not including calc times)
 
@@ -153,20 +153,28 @@ static inline uint32_t buttonPress(void) {
 }
 
 struct PIDVAL {
-    double error;
+    double error1;
+    double error2;
+    double error3;
+    double error4;
     double control;
+    double controlPrev
 };
 
 
-static inline struct PIDVAL PID(struct PIDVAL PIDVALS, float angleRead, float setPoint, float priorError, float kp, float ki, float kd, uint32_t dtMS) {
+static inline struct PIDVAL PID(struct PIDVAL PIDVALS, float angleRead, float setPoint, double kp, double ki, double kd, uint32_t dtMS) {
 
-    PIDVALS.error = setPoint - angleRead; 
+    PIDVALS.error1 = setPoint - angleRead; 
 
-    double dt = dtMS / 1000; //converts from MS to S
+    double dt = dtMS / 1000.0; //converts from MS to S
 
-    //PIDVALS.control = kp * PIDVALS.error + ki * (PIDVALS.error - priorError) * dt + kd * (PIDVALS.error - priorError) / dt;
-    PIDVALS.control = kp * PIDVALS.error + ki * (double)(PIDVALS.error + priorError) * dt;
+    double Ti = kp / ki;
+    double Td = kd / kp;
 
+    PIDVALS.control = PIDVALS.controlPrev + kp * (((1 + (dt / Ti) + (Td / dt)) * (PIDVALS.error1 - PIDVALS.error2)) + (-1 - (2 * Td / dt) * (PIDVALS.error2 - PIDVALS.error3) + (Td / dt) * (PIDVALS.error3 - PIDVALS.error4)));
+
+    ESP_LOGI(TAG, "ERROR1=%f AngleRead=%f", PIDVALS.error1, angleRead);
+    
     return PIDVALS;
 }
 
@@ -186,7 +194,7 @@ static inline uint32_t controlToMs(double control) {
 
 
     uint32_t us = (uint32_t)((360 / 90) * control + 1215);
-    ESP_LOGI(TAG, "us=%u, control=%0.3f", (unsigned)us, (double)control);
+    //ESP_LOGI(TAG, "us=%u, control=%0.3f", (unsigned)us, (double)control);
 
     return us;
 }
@@ -237,8 +245,12 @@ void app_main(void)
     complimentary_angle_t angles;
 
     struct PIDVAL PIDVALS = {
-        .error = 0.0,
-        .control = 0.0
+        .error1 = 0.0,
+        .error2 = 0.0,
+        .error3 = 0.0,
+        .error4 = 0.0,
+        .control = 0.0,
+        .controlPrev = 0.0
     };
 
     long start = xTaskGetTickCount();
@@ -258,9 +270,12 @@ void app_main(void)
 
         float angleRead = angles.roll; //Need to change depending on how the sensor is positioned final!
 
-        PIDVALS = PID(PIDVALS, angleRead, setPoint, priorError, kp, ki, kd, dtMS);
+        PIDVALS = PID(PIDVALS, angleRead, setPoint, kp, ki, kd, dtMS);
 
-        priorError = PIDVALS.error;
+        PIDVALS.error4 = PIDVALS.error3;
+        PIDVALS.error3 = PIDVALS.error2;
+        PIDVALS.error2 = PIDVALS.error1;
+        PIDVALS.controlPrev = PIDVALS.control;
 
         uint32_t us = controlToMs(PIDVALS.control);
 
