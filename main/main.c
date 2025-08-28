@@ -37,16 +37,16 @@ Todo:
 #define ESC_FREQ        50
 #define LEDC_CLK        LEDC_AUTO_CLK
 #define ESC_MIN_US      1000
-#define ESC_MAX_US      2000
+#define ESC_MAX_US      1400
 
 //Button Params
 #define LED_PIN         GPIO_NUM_2
 #define BUTTON_PIN      GPIO_NUM_18
 
 //PID Controller Params
-#define KP              0.35
-#define KI              5.0
-#define KD              1.0
+#define KP              0.3
+#define KI              0.2
+#define KD              1.25
 #define RUNTIME         20 //seconds
 #define DTMS            10  //~1ms interval for PID loop calcs (not including calc times)
 
@@ -154,18 +154,30 @@ static inline uint32_t buttonPress(void) {
 
 struct PIDVAL {
     double error;
+    double errorSum;
     double control;
 };
 
 
 static inline struct PIDVAL PID(struct PIDVAL PIDVALS, float angleRead, float setPoint, float priorError, float kp, float ki, float kd, uint32_t dtMS) {
 
-    PIDVALS.error = setPoint - angleRead; 
+    PIDVALS.error = angleRead - setPoint; 
 
     double dt = dtMS / 1000; //converts from MS to S
 
+    if (PIDVALS.errorSum < 250 || PIDVALS.error < 0) {
+        PIDVALS.errorSum += PIDVALS.error;
+    }
+
+
+    double proportional = kp * PIDVALS.error;
+    double integral = ki * PIDVALS.errorSum;
+    double derivative = kd * (PIDVALS.error - priorError);
+
     //PIDVALS.control = kp * PIDVALS.error + ki * (PIDVALS.error - priorError) * dt + kd * (PIDVALS.error - priorError) / dt;
-    PIDVALS.control = kp * PIDVALS.error + ki * (double)(PIDVALS.error + priorError) * dt;
+    PIDVALS.control = proportional + integral + derivative;
+
+    ESP_LOGI(TAG, "Angle=%f Error=%0.2f Proportional=%0.4f Integral=%0.4f Derivative=%0.4f Control=%0.4f", angleRead, PIDVALS.error, proportional, integral, derivative, PIDVALS.control);
 
     return PIDVALS;
 }
@@ -173,20 +185,8 @@ static inline struct PIDVAL PID(struct PIDVAL PIDVALS, float angleRead, float se
 //Mapping control signal to MS value between 1000us and 2000us - Linear interpolation
 static inline uint32_t controlToMs(double control) {
 
-    //y = 1000/90 * control + 1000;
-    //Assuming abs(max error) will be 90 degrees
-
-    if(control > 0 || control > 90) {
-       control = 0;
-    }
-
-    if(control < 0) {
-        control = (double)-1.0 * control;
-    }
-
-
-    uint32_t us = (uint32_t)((360 / 90) * control + 1215);
-    ESP_LOGI(TAG, "us=%u, control=%0.3f", (unsigned)us, (double)control);
+    uint32_t us = (uint32_t)((300 / 120) * control + 1215);
+    //ESP_LOGI(TAG, "us=%u, control=%0.3f", (unsigned)us, (double)control);
 
     return us;
 }
@@ -238,6 +238,7 @@ void app_main(void)
 
     struct PIDVAL PIDVALS = {
         .error = 0.0,
+        .errorSum =0.0,
         .control = 0.0
     };
 
@@ -276,7 +277,7 @@ void app_main(void)
 
     writeToESC(ESC_MIN_US);
 
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(500));
 
 }
 
