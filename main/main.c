@@ -16,8 +16,23 @@ Todo:
 2. Setup MPU6050 [Done]
 3. Setup PWM Functionality [Done]
 4. Setup Button Activation [Done]
-5. Setup PID Control Loop
-6. Success? (After Tesiting OFC)
+5. Setup PID Control Loop [Done]
+6. Success? (After Tesiting OFC) 
+*/
+
+/*
+Original Issue:
+- Error: Didn't work as a PID controller would
+- Fix: Sign errors + forgot parathensis + etc in PID equation
+
+- Error: Odd behavior
+- Fix: Go back to more basic PID formula from Wikiapedia (instead of the "actual one above it" - likely due to how I was handeling error...)
+
+- Error: Tuning it didn't help at all, felt like no matter how I set it (as in increase ki to it's limit) there would be SSE or just too unstable to safely use near my PSU)
+- Fix: Changed how I mapped control to us, instead of trying to make "m" insto something fancy where in theory it would be semi-normalized then multiply 
+       it by the max value I'd want, and then add "b", the motor spinning threshold. I chose to instead to throw that out the window. I made b a value that could hold it
+       nearly steady at the horizontal point (max theoretical required thrust for application), and then made m = 1 so it was just us = control + motorbias. 
+       
 */
 
 //MPU - I2C Params
@@ -37,18 +52,22 @@ Todo:
 #define ESC_FREQ        50
 #define LEDC_CLK        LEDC_AUTO_CLK
 #define ESC_MIN_US      1000
-#define ESC_MAX_US      1400
+#define ESC_IDLE_US     1225
+#define ESC_MAX_US      1500
 
 //Button Params
 #define LED_PIN         GPIO_NUM_2
 #define BUTTON_PIN      GPIO_NUM_18
 
 //PID Controller Params
-#define KP              0.3
-#define KI              0.2
-#define KD              1.25
+#define KP              0.35 //Unstable at 0.5 - Prev 0.25
+#define KI              0.15 //Limit of stability (kp = 0.25) ki = 0.16125 -> prev 0.215
+#define KD              0.0
+#define MOTORBIAS       1350 //PWM -> us
+#define MAXERRORSUM     1250
+
 #define RUNTIME         20 //seconds
-#define DTMS            10  //~1ms interval for PID loop calcs (not including calc times)
+#define DTMS            50  //~1ms interval for PID loop calcs (not including calc times)
 
 //I2C Setup 
 static void i2cConfig(void) {
@@ -124,6 +143,7 @@ static inline void writeToESC(uint32_t us) {
     if (us < ESC_MIN_US) us = ESC_MIN_US;
     if (us > ESC_MAX_US) us = ESC_MAX_US;
 
+    ESP_LOGI(TAG, "us=%i", us);
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, us_to_duty(us)));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
 
@@ -163,32 +183,50 @@ static inline struct PIDVAL PID(struct PIDVAL PIDVALS, float angleRead, float se
 
     PIDVALS.error = angleRead - setPoint; 
 
-    double dt = dtMS / 1000; //converts from MS to S
+    double dt = dtMS / 1000.0; //converts from MS to S
 
-    if (PIDVALS.errorSum < 250 || PIDVALS.error < 0) {
-        PIDVALS.errorSum += PIDVALS.error;
+    PIDVALS.errorSum += PIDVALS.error;
+
+    if (PIDVALS.errorSum > MAXERRORSUM) {
+        PIDVALS.errorSum = MAXERRORSUM;
+    }
+    if (PIDVALS.errorSum < -MAXERRORSUM) {
+        PIDVALS.errorSum = -MAXERRORSUM;
     }
 
-
     double proportional = kp * PIDVALS.error;
-    double integral = ki * PIDVALS.errorSum;
-    double derivative = kd * (PIDVALS.error - priorError);
+    double integral = ki * PIDVALS.errorSum * dt;
+    double derivative = kd * (PIDVALS.error - (double)priorError) / dt;
+
+    //if (PIDVALS.error > 5 || PIDVALS.error < -5) {
+    //    integral = 0.5 * integral;
+    //}
 
     //PIDVALS.control = kp * PIDVALS.error + ki * (PIDVALS.error - priorError) * dt + kd * (PIDVALS.error - priorError) / dt;
     PIDVALS.control = proportional + integral + derivative;
 
-    ESP_LOGI(TAG, "Angle=%f Error=%0.2f Proportional=%0.4f Integral=%0.4f Derivative=%0.4f Control=%0.4f", angleRead, PIDVALS.error, proportional, integral, derivative, PIDVALS.control);
+    //ESP_LOGI(TAG, "Angle=%f Error=%0.2f ErrorSum=%0.2f Proportional=%0.4f Integral=%0.4f Derivative=%0.4f Control=%0.4f", angleRead, PIDVALS.error, PIDVALS.errorSum, proportional, integral, derivative, PIDVALS.control);
 
     return PIDVALS;
 }
 
 //Mapping control signal to MS value between 1000us and 2000us - Linear interpolation
-static inline uint32_t controlToMs(double control) {
+static inline int32_t controlToMs(double control) {
 
-    uint32_t us = (uint32_t)((300 / 120) * control + 1215);
+    int32_t us = (int32_t)control + MOTORBIAS;
     //ESP_LOGI(TAG, "us=%u, control=%0.3f", (unsigned)us, (double)control);
 
     return us;
+}
+
+static inline void motorRampFunct() {
+    ESP_LOGI(TAG, "Ramping!");
+    for (uint32_t i = ESC_IDLE_US; i < 1300; i += 10) {
+        writeToESC(i);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGI(TAG, "Ramped!");
+
 }
 
 void app_main(void)
@@ -238,9 +276,11 @@ void app_main(void)
 
     struct PIDVAL PIDVALS = {
         .error = 0.0,
-        .errorSum =0.0,
+        .errorSum = 0.0,
         .control = 0.0
     };
+
+    motorRampFunct();
 
     long start = xTaskGetTickCount();
 
