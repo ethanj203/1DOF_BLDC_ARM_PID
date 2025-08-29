@@ -60,11 +60,11 @@ Original Issue:
 #define BUTTON_PIN      GPIO_NUM_18
 
 //PID Controller Params
-#define KP              0.35 //Unstable at 0.5 - Prev 0.25
-#define KI              0.15 //Limit of stability (kp = 0.25) ki = 0.16125 -> prev 0.215
-#define KD              0.0
-#define MOTORBIAS       1350 //PWM -> us
-#define MAXERRORSUM     1250
+#define KP              0.5 //Stability limit @ kp = 0.675 (if touching side of mount)    Good Val: kp = 0.335
+#define KI              2.00 //Limit of stability (kp = 0.XX) prev 0.25                     Good Val: ki = 0.3
+#define KD              0.25 // Increasing it past this point makes derivative spike       Gool Val: kd = 0.15
+#define MOTORBIAS       1300 //PWM -> us
+#define MAXERRORSUM     500
 
 #define RUNTIME         20 //seconds
 #define DTMS            50  //~1ms interval for PID loop calcs (not including calc times)
@@ -143,7 +143,7 @@ static inline void writeToESC(uint32_t us) {
     if (us < ESC_MIN_US) us = ESC_MIN_US;
     if (us > ESC_MAX_US) us = ESC_MAX_US;
 
-    ESP_LOGI(TAG, "us=%i", us);
+    //ESP_LOGI(TAG, "us=%i", us);
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, us_to_duty(us)));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
 
@@ -205,7 +205,7 @@ static inline struct PIDVAL PID(struct PIDVAL PIDVALS, float angleRead, float se
     //PIDVALS.control = kp * PIDVALS.error + ki * (PIDVALS.error - priorError) * dt + kd * (PIDVALS.error - priorError) / dt;
     PIDVALS.control = proportional + integral + derivative;
 
-    //ESP_LOGI(TAG, "Angle=%f Error=%0.2f ErrorSum=%0.2f Proportional=%0.4f Integral=%0.4f Derivative=%0.4f Control=%0.4f", angleRead, PIDVALS.error, PIDVALS.errorSum, proportional, integral, derivative, PIDVALS.control);
+    ESP_LOGI(TAG, "Angle=%f Error=%0.2f ErrorSum=%0.2f Proportional=%0.4f Integral=%0.4f Derivative=%0.4f Control=%0.4f", angleRead, PIDVALS.error, PIDVALS.errorSum, proportional, integral, derivative, PIDVALS.control);
 
     return PIDVALS;
 }
@@ -247,7 +247,7 @@ void app_main(void)
     double priorError = 0;
     //uint32_t PIDVALS.control = 0;
 
-    double setPoint = 0.0; //Degrees
+    double setPoint = 45.0; //Degrees
 
     uint32_t runTime = RUNTIME * 1000; //converts s to MS
 
