@@ -9,17 +9,6 @@
 #include "driver/i2c.h"
 #include "mpu6050.h"
 
-
-/*
-Todo:
-1. Setup I2C (FOR MPU) [Done]
-2. Setup MPU6050 [Done]
-3. Setup PWM Functionality [Done]
-4. Setup Button Activation [Done]
-5. Setup PID Control Loop [Done]
-6. Success? (After Tesiting OFC) 
-*/
-
 /*
 Original Issue:
 - Error: Didn't work as a PID controller would
@@ -43,7 +32,7 @@ Original Issue:
 #define SCL_PIN         GPIO_NUM_22
 #define I2C_CLK_SPEED   400000
 
-//LEDC Params
+//LEDC Params (For PWM Control)
 #define ESC_PIN         GPIO_NUM_19
 #define LEDC_MODE       LEDC_HIGH_SPEED_MODE
 #define LEDC_CHANNEL    LEDC_CHANNEL_0
@@ -59,15 +48,18 @@ Original Issue:
 #define LED_PIN         GPIO_NUM_2
 #define BUTTON_PIN      GPIO_NUM_18
 
+//Wifi & HTTP POST Params
+// Do later once I setup datalogging over wifi
+
 //PID Controller Params
-#define KP              0.5 //Stability limit @ kp = 0.675 (if touching side of mount)    Good Val: kp = 0.335
-#define KI              2.00 //Limit of stability (kp = 0.XX) prev 0.25                     Good Val: ki = 0.3
-#define KD              0.25 // Increasing it past this point makes derivative spike       Gool Val: kd = 0.15
-#define MOTORBIAS       1300 //PWM -> us
-#define MAXERRORSUM     500
+#define KP              0.75 //Stability limit @ kp = 0.675 (if touching side of mount)     @20Hz (50ms) 1300 BIAS    ->    Good Val: kp = 0.5
+#define KI              1.55 //Limit of stability (kp = 0.XX) prev 0.25                                                     Good Val: ki = 2.00
+#define KD              0.40 // Increasing it past this point makes derivative spike                                        Good Val: kd = 0.25
+#define MOTORBIAS       1325 //PWM -> us
+#define MAXERRORSUM     250
 
 #define RUNTIME         20 //seconds
-#define DTMS            50  //~1ms interval for PID loop calcs (not including calc times)
+#define DTMS            20 //ms interval for PID loop calcs (not including calc times)
 
 //I2C Setup 
 static void i2cConfig(void) {
@@ -129,8 +121,8 @@ static void buttonConfig(void) {
 //Converts from time (us) to PWM Duty
 static inline uint32_t us_to_duty(uint32_t us) {
 
-    const uint32_t max_duty = (1u << LEDC_RES) - 1u;
-    const uint32_t period_us = 1000000u / ESC_FREQ;
+    const uint32_t max_duty = ((uint32_t)1 << LEDC_RES) - (uint32_t)1;
+    const uint32_t period_us = (uint32_t)1000000 / ESC_FREQ;
     uint64_t duty = (uint64_t)us * max_duty / period_us;
     
     return (duty > max_duty) ? max_duty : (uint32_t)duty;
@@ -198,11 +190,6 @@ static inline struct PIDVAL PID(struct PIDVAL PIDVALS, float angleRead, float se
     double integral = ki * PIDVALS.errorSum * dt;
     double derivative = kd * (PIDVALS.error - (double)priorError) / dt;
 
-    //if (PIDVALS.error > 5 || PIDVALS.error < -5) {
-    //    integral = 0.5 * integral;
-    //}
-
-    //PIDVALS.control = kp * PIDVALS.error + ki * (PIDVALS.error - priorError) * dt + kd * (PIDVALS.error - priorError) / dt;
     PIDVALS.control = proportional + integral + derivative;
 
     ESP_LOGI(TAG, "Angle=%f Error=%0.2f ErrorSum=%0.2f Proportional=%0.4f Integral=%0.4f Derivative=%0.4f Control=%0.4f", angleRead, PIDVALS.error, PIDVALS.errorSum, proportional, integral, derivative, PIDVALS.control);
@@ -210,7 +197,7 @@ static inline struct PIDVAL PID(struct PIDVAL PIDVALS, float angleRead, float se
     return PIDVALS;
 }
 
-//Mapping control signal to MS value between 1000us and 2000us - Linear interpolation
+//Mapping control signal to MS value between 1000us and 2000us - Linear interpolation (OLD VERSION, now just adds motorbias)
 static inline int32_t controlToMs(double control) {
 
     int32_t us = (int32_t)control + MOTORBIAS;
@@ -245,21 +232,20 @@ void app_main(void)
     double kd = KD;
 
     double priorError = 0;
-    //uint32_t PIDVALS.control = 0;
 
-    double setPoint = 45.0; //Degrees
+    double setPoint = 0.0; //Degrees
 
     uint32_t runTime = RUNTIME * 1000; //converts s to MS
 
     writeToESC(ESC_MIN_US); // Sets "throttle" to zero for ESC Init
-    ESP_LOGI(TAG, "3s Delay for ESC Startup");
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    ESP_LOGI(TAG, "PWM SET TO 1000us!");
     ESP_LOGI(TAG, "Waiting for buttonpress to proceed!");
 
     buttonPress();
 
     ESP_LOGI(TAG, "MOVED PASS BUTTONPRESS");
 
+    //Gotta do this inside app main otherwise the mpu6050 chooses to not work (from what I know) 
     mpu6050_handle_t mpu6050 = mpu6050_create(I2C_MASTER_NUM, MPU6050_I2C_ADDRESS); //Remember, have to actually assign the handle to something!
 
     if(!mpu6050) {
@@ -286,7 +272,7 @@ void app_main(void)
 
     /*
         Run loop with PID, Controll to Duty, Write to Duty to ESC functionality
-        Make break condition for loop to be after x amount of seconds!
+        Make break condition for loop to be after rumTime amount of seconds!
     */
     while (xTaskGetTickCount() - start < pdMS_TO_TICKS(runTime)) {
 
@@ -295,8 +281,6 @@ void app_main(void)
 
         mpu6050_complimentory_filter(mpu6050, &acce, &gyro, &angles);
 
-        //ESP_LOGI(TAG, "pitch=%0.2f, roll=%0.2f", angles.pitch, angles.roll);
-
         float angleRead = angles.roll; //Need to change depending on how the sensor is positioned final!
 
         PIDVALS = PID(PIDVALS, angleRead, setPoint, priorError, kp, ki, kd, dtMS);
@@ -304,8 +288,6 @@ void app_main(void)
         priorError = PIDVALS.error;
 
         uint32_t us = controlToMs(PIDVALS.control);
-
-        //ESP_LOGI(TAG, "us=%u, error=%0.3f, priorError=%0.3f, control=%0.3f", (unsigned)us, (double)PIDVALS.error, (double)priorError, (double)PIDVALS.control);
 
         writeToESC(us);
 
